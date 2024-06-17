@@ -240,6 +240,73 @@ def _remap_to_groups(
     return permute, inv_permute, offsets, inv_offsets, splits
 
 
+@torch.fx.wrap
+def _multi_remap_to_groups(
+    keys: List[List[str]],
+    key_lengths: List[List[int]],
+    groups: List[List[str]],
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Given a list of keys and lengths per key for each group, return the permute 2D tensor, and 1D tensor lengths:
+    [[input_tensor_idx, output_tensor_idx, input_start, output_start, length]], [length]
+    """
+    #  key => (tensor_idx, key_index)
+    key_map: Dict[str, Tuple[int, int]] = {
+        key: (tensor_idx, key_idx)
+        for tensor_idx, tensor in enumerate(keys)
+        for key_idx, key in enumerate(tensor)
+    }
+
+    #  [offsets per tensor]
+    offsets_list: List[List[int]] = [_cumsum(tensor) for tensor in key_lengths]
+
+    # [input_tensor_idx, output_tensor_idx, input_start, output_start, length]
+    permute_list: List[List[int]] = []
+    output_lengths: List[int] = [0] * len(groups)
+
+    total_permutes = sum(len(tensor) for tensor in groups)
+    last_seen: Dict[str, int] = {}
+    for output_tensor_idx, output_tenser in enumerate(groups):
+        output_start = 0
+        for output_key in output_tenser:
+            input_tensor_idx, input_key_idx = key_map[output_key]
+            input_start = offsets_list[input_tensor_idx][input_key_idx]
+            length = key_lengths[input_tensor_idx][input_key_idx]
+
+            # add jump data
+            if output_key in last_seen:
+                jump = last_seen[output_key]
+                if jump >= 0:  # it's a jump start
+                    # change previous jump to current
+                    permute_list[jump][5] = len(permute_list)
+                else:  # it's already in a jump sequence
+                    permute_list[-jump][5] = -len(permute_list)
+                last_seen[output_key] = -len(permute_list)  #  it's already in jump
+                jump = -total_permutes
+            else:
+                jump = 0
+                last_seen[output_key] = len(permute_list)  # potential jump start
+
+            permute_list.append(
+                [
+                    input_tensor_idx,
+                    output_tensor_idx,
+                    input_start,
+                    output_start,
+                    length,
+                    jump,
+                ]
+            )
+            output_start += length
+        output_lengths[output_tensor_idx] = output_start
+    permutes = torch.tensor(permute_list, dtype=torch.int64)
+    in_lengths = torch.tensor(
+        [offsets[-1] for offsets in offsets_list], dtype=torch.int64
+    )
+    out_lengths = torch.tensor(output_lengths, dtype=torch.int64)
+    return permutes, in_lengths, out_lengths
+
+
 def _values_string(values: torch.Tensor, start: int, end: int) -> str:
     size = values.size()
     if len(size) == 1:
