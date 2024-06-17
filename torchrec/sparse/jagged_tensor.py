@@ -165,6 +165,23 @@ def _all_keys_used_once(
 
 
 @torch.fx.wrap
+def permute_multi_embedding(
+    keyed_tensors: List["KeyedTensor"], groups: List[List["str"]]
+) -> List[torch.Tensor]:
+    keys, lengths, values = _desugar_keyed_tensors(keyed_tensors)
+    permutes, in_lengths, out_lengths = _multi_remap_to_groups(keys, lengths, groups)
+    device = values[0].device
+    permuted_values = torch.ops.fbgemm.permute_multi_embedding(
+        values,  # list of tensors (on device)
+        _pin_and_move(permutes, device),
+        out_lengths.tolist(),  # List[int] on CPU
+        _pin_and_move(in_lengths, device),
+        _pin_and_move(out_lengths, device),
+    )
+    return permuted_values
+
+
+@torch.fx.wrap
 def _fbgemm_permute_pooled_embs(
     keyed_tensors: List["KeyedTensor"], groups: List[List["str"]]
 ) -> List[torch.Tensor]:
